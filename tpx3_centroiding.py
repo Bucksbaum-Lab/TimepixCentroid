@@ -69,7 +69,7 @@ def batch_blocks(blocks):
     return block_batch
 
 def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trigger_num=0,
-                      return_time_tests=False,skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2):
+                      skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2):
     '''
     True centroiding file. Does all the heavy lifting and micromanaging of the centroiding process. Ian should add more here.
     Parameters
@@ -80,12 +80,12 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     start_trigger_num : 
     return_time_tests : 
     skiprows : 
-    tottofcorr : (default True) Boolean, defines whether or not to do the tot/tof correction. Is generally helpful for higher precision ToFs but should be turned off if VMI conditions changed and tot/tof fit parameters need to be refitted to uncorrected data.
-    show_bar : (default True) Boolean, defines whether to print time information and progress bar
+    tottofcorr : (default True) Defines whether or not to do the tot/tof correction. Is generally helpful for higher precision ToFs but should be turned off if VMI conditions changed and tot/tof fit parameters need to be refitted to uncorrected data.
+    show_bar : (default True) Defines whether to print time information and progress bar
     centroid_area_size : 
     Returns
     ~~~~~~~~~~
-    centroids : Array of shape (N,6) containing the information [x,y,tot,tof,trigger number,parameter number] for each hit
+    centroids : Nx6 array of the form [x,y,tot,tof,trigger,parameter]
     neighbors_times : 
     centroiding_times : 
     concatenation_times : 
@@ -106,7 +106,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     
     block_sizes = np.diff(trigger_lines)-1
     
-    #### eleanor modified c code so we dont offset by 260 #############
+    #### deals with offset by 260 pixels in y in a backwards compatible way #############
     i = 0
     while i < data_array.shape[0]:
         if i not in trigger_lines:
@@ -117,10 +117,10 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     if data_array[i,2] > 259:
         data_array -= np.array([0,0,260,0]) # fix the fact that y is off by 260
         
-    ###################################################################
-    
-    #### eleanor adding toftot shit #############
+    #### end offset by 260 in y backwards compatibility section ##########################
 
+    
+    #### ToT-ToF correction section, change these parameters if VMI conditions change ####
     if tottofcorr:
         fix_y = np.argwhere((data_array[:,2]>=193.5) & (data_array[:,2]<=203.5) | (data_array[:,2]>=181.5) & (data_array[:,2]<=183.5)).flatten()
         data_array[fix_y,0] -= 25*1e-9
@@ -148,6 +148,11 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     if show_bar:
         print(f'sort time: {t0-t0a:.2f} sec')
     
+    
+    
+    
+    #### This section does the batched GPU centroiding #################
+    
     data_array = torch.tensor(data_array,device='cuda:0')
 
     centroids = torch.zeros((int(data_array.shape[0]/5),6),device='cuda:0')
@@ -170,59 +175,45 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         
         max_size = np.max(block_sizes[trigger_num-start_trigger_num:trigger_num-start_trigger_num+batch_size])
         block_batch = torch.zeros((max_size,4,batch_size),dtype=torch.float64,device='cuda:0')
+        
+        tot_offset = 0.001*torch.arange(max_size).cuda()
+        tot_offset2 = [tot_offset * (1000*tot_offset<block_size) for block_size in block_sizes[trigger_num-start_trigger_num:trigger_num-start_trigger_num+batch_size]]
+        tot_offset2 = torch.stack(tot_offset2).transpose(1,0)
+        
         for i in range(batch_size):
             try:
                 block_size = block_sizes[trigger_num-start_trigger_num+i]
                 block_batch[:block_size,:,i] = data_array[trigger_lines[trigger_num-start_trigger_num+i]+1:trigger_lines[trigger_num-start_trigger_num+i+1]]
-#                 # ----- Chuan change 2024/11/04
-#                 # ----- Add small, unique ToT offsets to remove double local maxima problem
-#                 for kk in range(block_size):
-#                     block_batch[kk,1,i] += kk*0.001
-#                 # ----- Chuan change 2024/11/04
             except Exception as e:
+                print(e)
                 block_batch = block_batch[:,:,:i]
-        nt0 = time.time()
+        block_batch[:,1,:] += tot_offset2
+
         try:
             neighbors_batch = get_neighbors(block_batch,size=centroid_area_size)
         except:
             continue
         
         local_maxima_filter_batch = get_local_maxima_batch(block_batch,neighbors_batch)
-#         # ----- Chuan change 2024/11/04
-#         # ----- Remove ToT offset after finding local maxima
-#         for i in range(batch_size):
-#             try:
-#                 block_size = block_sizes[trigger_num-start_trigger_num+i]
-#                 for kk in range(block_size):
-#                     block_batch[kk,1,i] -= kk*0.001
-#             except Exception as e:
-#                 print('?')
-#         # ----- Chuan change 2024/11/04
+        block_batch[:,1,:] -= tot_offset2
+        
         num_local_maxima_batch = torch.sum(local_maxima_filter_batch,dim=0)
         lmfb = torch.nonzero(local_maxima_filter_batch,as_tuple=True)
-        nt1 = time.time()
-        ctb0 = time.time()
+
         centroids_x_batch = (torch.sum(block_batch[:,3]*neighbors_batch*block_batch[:,1],axis=1)/torch.sum(block_batch[:,1]*neighbors_batch,axis=1))
         centroids_y_batch = (torch.sum(block_batch[:,2]*neighbors_batch*block_batch[:,1],axis=1)/torch.sum(block_batch[:,1]*neighbors_batch,axis=1))
-        ctb00 = time.time()
         centroids_x_batch = centroids_x_batch[lmfb]
         centroids_y_batch = centroids_y_batch[lmfb]
-
-        ctb10 = time.time()
 
         trigger_vals_batch = torch.tensor([data_array[trigger_lines[trigger_num-start_trigger_num+batch_trigger_num],0] for batch_trigger_num in range(local_maxima_filter_batch.shape[-1])],device=local_maxima_filter_batch.device,dtype=torch.float64)
         trigger_nums_batch = (local_maxima_filter_batch*torch.arange(trigger_num,trigger_num+local_maxima_filter_batch.shape[-1],1,device=local_maxima_filter_batch.device,dtype=torch.float64))[lmfb]
         triggers_batch = (local_maxima_filter_batch*trigger_vals_batch)[lmfb]
         
-        ctb1 = time.time()
-
         tot_hits_batch = block_batch[:,1][lmfb]
         toa_hits_batch = block_batch[:,0][lmfb]-triggers_batch.cuda()
 
         param_nums = torch.ones(trigger_nums_batch.shape[0]).cuda()*(param_number-1)
         
-        ctb3 = time.time()
-        catt0 = time.time()
         centroids_trigger = torch.stack((centroids_x_batch,centroids_y_batch,tot_hits_batch,toa_hits_batch,trigger_nums_batch.cuda(),param_nums),dim=-1)
         centroids_trigger = centroids_trigger[centroids_trigger[:, 4].argsort()]
 
@@ -231,12 +222,8 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
             num_centroids += len(centroids_trigger)
         except Exception as e:
             centroids = torch.cat((centroids,centroids_trigger),dim=0)
-        
-        catt1 = time.time()
-        
-        neighbors_times.append(nt1-nt0)
-        centroiding_times.append([ctb00-ctb0,ctb10-ctb00,ctb1-ctb10,ctb3-ctb1])
-        concatenation_times.append(catt1-catt0)
+    
+    #### end batched GPU centroiding section ##################
 
     centroids[:,3] = centroids[:,3]*1e6
     centroids = centroids[:num_centroids].cpu().numpy()
@@ -248,8 +235,6 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         progress.close()
         print('Done!')
 
-    if return_time_tests:
-        return centroids,neighbors_times,np.array(centroiding_times),concatenation_times
     return centroids
 
 def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_centroids',
