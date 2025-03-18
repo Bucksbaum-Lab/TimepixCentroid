@@ -1,0 +1,345 @@
+import numpy as np
+import time
+import torch
+from scipy.ndimage import center_of_mass as com
+from scipy.optimize import curve_fit
+
+from tqdm.notebook import tqdm
+from pathlib import Path
+
+# eleanor modified 03/17/25
+
+def centroid_block(block):
+    '''
+    Produces centroids of hits within a single trigger
+    Parameters
+    ~~~~~~~~~~
+    block : array of shape (N,4) listing all (ToA, ToT, y, x) pixel values for a single trigger
+    Returns
+    ~~~~~~~~~~
+    centroids_block : 2-tuple, list of x and y centroid values
+    '''
+    if block.size==0:
+        return 0,0
+    tots, toas, ys, xs = block.T
+    centroids_block = (torch.sum(xs*tots)/torch.sum(tots)),(torch.sum(ys*tots)/torch.sum(tots))
+    return centroids_block
+
+def get_neighbors(block,size=1,tsep=1.0e-6):
+    block_rep = block.expand(block.shape[0],*[-1 for _ in range(len(block.shape))])
+    block_sub = block_rep - block_rep.transpose(1,0)
+    return (torch.abs(block_sub[:,:,3])<=size)&(torch.abs(block_sub[:,:,2])<=size)&(torch.abs(block_sub[:,:,0])<=tsep)
+
+def get_local_maxima(block,neighbors,min_size=3,**kwargs):
+    try:
+        tot_neighbors = block[:,1]*neighbors
+        argmaxes = torch.argmax(tot_neighbors,dim=1)
+        local_maxima = torch.unique(argmaxes)
+        return local_maxima
+    except Exception as e:
+        return torch.tensor([],dtype=int).to(block.device)
+
+def get_local_maxima_batch(block,neighbors,min_size=3,**kwargs):
+    try:
+        block_rep = block.expand(block.shape[0],*[-1 for _ in range(len(block.shape))])
+        tot_neighbors = block_rep[:,:,1]*neighbors
+        tot_neighbors_sub = tot_neighbors.transpose(1,0) - torch.diagonal(tot_neighbors).T
+        local_maxima = (torch.amax(tot_neighbors_sub,dim=0)==0)&(torch.amin(tot_neighbors_sub,dim=0)<0)&(torch.sum(neighbors,dim=0)>=min_size)
+        return local_maxima
+    except Exception as e:
+        return torch.tensor([[]],dtype=int).to(block.device)
+    
+def tottof_fit_func(x, a, b, c, d):
+    '''
+    Used to correct for tot-tof correlation effect ('timewalk'). Fitted values are predetermined for specific VMI conditions and loaded in. Can also be run post-centroiding but is more precise this way
+    Parameters
+    ~~~~~~~~~~
+    x : ToT values of pre-centroided data.
+    a,b,c,d : values defined by isolating a single ion peak, finding the center of the ToF distribution for each ToT by fitting a gaussian, and fitting the resulting ToF(ToT) data to this function. Saved in the hard-coded variable 'fitty', changes in voltage/timing may affect this
+    Returns
+    ~~~~~~~~~~
+    corrected ToF for input ToT value
+    '''
+    return a / ((x + b) ** d) + c
+
+
+def batch_blocks(blocks):
+    max_size = np.max([len(block) for block in blocks])
+    block_batch = torch.zeros((max_size,4,len(blocks)),dtype=torch.float64,device='cuda:0')
+    for i,block in enumerate(blocks):
+        block_batch[:len(block),:,i] = block
+    return block_batch
+
+def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trigger_num=0,
+                      return_time_tests=False,skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2):
+    '''
+    True centroiding file. Does all the heavy lifting and micromanaging of the centroiding process. Ian should add more here.
+    Parameters
+    ~~~~~~~~~~
+    filename : 
+    read_line_num : 
+    batch_size : 
+    start_trigger_num : 
+    return_time_tests : 
+    skiprows : 
+    tottofcorr : (default True) Defines whether or not to do the tot/tof correction. Is generally helpful for higher precision ToFs but should be turned off if VMI conditions changed and tot/tof fit parameters need to be refitted to uncorrected data.
+    show_bar : (default True) Defines whether to print time information and progress bar
+    centroid_area_size : 
+    Returns
+    ~~~~~~~~~~
+    centroids : Nx6 array of the form [x,y,tot,tof,trigger,parameter]
+    neighbors_times : 
+    centroiding_times : 
+    concatenation_times : 
+    '''
+    t1 = time.time()
+    if read_line_num is None:
+        data_array = np.loadtxt(filename)
+    else:
+        data_array = np.loadtxt(filename,max_rows = read_line_num,skiprows=skiprows)
+    
+    t0a = time.time()
+    if show_bar:
+        print(f'readin time: {t0a-t1:.2f} sec')
+
+    param_number = 0   
+    
+    trigger_lines = np.argwhere(np.sum(data_array[:,1:],axis=1)<-1).flatten()
+    
+    block_sizes = np.diff(trigger_lines)-1
+    
+    #### eleanor modified c code so we dont offset by 260 #############
+    i = 0
+    while i < data_array.shape[0]:
+        if i not in trigger_lines:
+            first_non_trigger_row = i
+            break
+        i += 1
+    
+    if data_array[i,2] > 259:
+        data_array -= np.array([0,0,260,0]) # fix the fact that y is off by 260
+        
+    ###################################################################
+    
+    #### eleanor adding toftot shit #############
+
+    if tottofcorr:
+        fix_y = np.argwhere((data_array[:,2]>=193.5) & (data_array[:,2]<=203.5) | (data_array[:,2]>=181.5) & (data_array[:,2]<=183.5)).flatten()
+        data_array[fix_y,0] -= 25*1e-9
+
+        fitty = np.array([11.9665668, 61.44000884, 4.16635999, 0.92730988])
+        offset = 4.183831122463326
+
+        mask = np.ones(data_array.shape[0], dtype=bool)
+        mask[trigger_lines] = False
+
+        cent_mod_val = np.zeros_like(data_array[:,1])
+        cent_mod_val[mask] = tottof_fit_func(data_array[mask,1], *fitty)*1e-6
+        cent_tof_mod = data_array[:,0] - cent_mod_val + offset*1e-6
+
+        data_array[mask, 0] = cent_tof_mod[mask]
+        t0 = time.time()
+        if show_bar:
+            print(f'correction time: {t0-t0a:.2f} sec')
+        t0a = t0
+    
+    #############################################
+
+    data_array = data_array[data_array[:, 0].argsort()]
+    t0 = time.time()
+    if show_bar:
+        print(f'sort time: {t0-t0a:.2f} sec')
+    
+    data_array = torch.tensor(data_array,device='cuda:0')
+
+    centroids = torch.zeros((int(data_array.shape[0]/5),6),device='cuda:0')
+    num_triggers = len(trigger_lines)
+    if show_bar:
+        print(f'Number of triggers : {num_triggers}')
+    neighbors_times,centroiding_times,concatenation_times = [],[],[]
+    if show_bar:
+        progress = tqdm(total=100)
+    num_centroids = 0
+    current_percentage = 0
+    temp = 0
+    for trigger_num,trigger_index in zip(np.arange(start_trigger_num,start_trigger_num+len(trigger_lines[:-1]),batch_size),trigger_lines[:-1]):
+
+        if int(100*(trigger_num-start_trigger_num)/num_triggers)>current_percentage and show_bar:
+            progress.update(1)
+            progress.set_description(f"Trigger {trigger_num + 1}/{num_triggers}")
+            progress.set_postfix({'Centroids so far' : num_centroids})
+            current_percentage += 1
+        
+        max_size = np.max(block_sizes[trigger_num-start_trigger_num:trigger_num-start_trigger_num+batch_size])
+        block_batch = torch.zeros((max_size,4,batch_size),dtype=torch.float64,device='cuda:0')
+        for i in range(batch_size):
+            try:
+                block_size = block_sizes[trigger_num-start_trigger_num+i]
+                block_batch[:block_size,:,i] = data_array[trigger_lines[trigger_num-start_trigger_num+i]+1:trigger_lines[trigger_num-start_trigger_num+i+1]]
+#                 # ----- Chuan change 2024/11/04
+#                 # ----- Add small, unique ToT offsets to remove double local maxima problem
+#                 for kk in range(block_size):
+#                     block_batch[kk,1,i] += kk*0.001
+#                 # ----- Chuan change 2024/11/04
+            except Exception as e:
+                block_batch = block_batch[:,:,:i]
+        nt0 = time.time()
+        try:
+            neighbors_batch = get_neighbors(block_batch,size=centroid_area_size)
+        except:
+            continue
+        
+        local_maxima_filter_batch = get_local_maxima_batch(block_batch,neighbors_batch)
+#         # ----- Chuan change 2024/11/04
+#         # ----- Remove ToT offset after finding local maxima
+#         for i in range(batch_size):
+#             try:
+#                 block_size = block_sizes[trigger_num-start_trigger_num+i]
+#                 for kk in range(block_size):
+#                     block_batch[kk,1,i] -= kk*0.001
+#             except Exception as e:
+#                 print('?')
+#         # ----- Chuan change 2024/11/04
+        num_local_maxima_batch = torch.sum(local_maxima_filter_batch,dim=0)
+        lmfb = torch.nonzero(local_maxima_filter_batch,as_tuple=True)
+        nt1 = time.time()
+        ctb0 = time.time()
+        centroids_x_batch = (torch.sum(block_batch[:,3]*neighbors_batch*block_batch[:,1],axis=1)/torch.sum(block_batch[:,1]*neighbors_batch,axis=1))
+        centroids_y_batch = (torch.sum(block_batch[:,2]*neighbors_batch*block_batch[:,1],axis=1)/torch.sum(block_batch[:,1]*neighbors_batch,axis=1))
+        ctb00 = time.time()
+        centroids_x_batch = centroids_x_batch[lmfb]
+        centroids_y_batch = centroids_y_batch[lmfb]
+
+        ctb10 = time.time()
+
+        trigger_vals_batch = torch.tensor([data_array[trigger_lines[trigger_num-start_trigger_num+batch_trigger_num],0] for batch_trigger_num in range(local_maxima_filter_batch.shape[-1])],device=local_maxima_filter_batch.device,dtype=torch.float64)
+        trigger_nums_batch = (local_maxima_filter_batch*torch.arange(trigger_num,trigger_num+local_maxima_filter_batch.shape[-1],1,device=local_maxima_filter_batch.device,dtype=torch.float64))[lmfb]
+        triggers_batch = (local_maxima_filter_batch*trigger_vals_batch)[lmfb]
+        
+        ctb1 = time.time()
+
+        tot_hits_batch = block_batch[:,1][lmfb]
+        toa_hits_batch = block_batch[:,0][lmfb]-triggers_batch.cuda()
+
+        param_nums = torch.ones(trigger_nums_batch.shape[0]).cuda()*(param_number-1)
+        
+        ctb3 = time.time()
+        catt0 = time.time()
+        centroids_trigger = torch.stack((centroids_x_batch,centroids_y_batch,tot_hits_batch,toa_hits_batch,trigger_nums_batch.cuda(),param_nums),dim=-1)
+        centroids_trigger = centroids_trigger[centroids_trigger[:, 4].argsort()]
+
+        try:
+            centroids[num_centroids:num_centroids+len(centroids_trigger)] = centroids_trigger
+            num_centroids += len(centroids_trigger)
+        except Exception as e:
+            centroids = torch.cat((centroids,centroids_trigger),dim=0)
+        
+        catt1 = time.time()
+        
+        neighbors_times.append(nt1-nt0)
+        centroiding_times.append([ctb00-ctb0,ctb10-ctb00,ctb1-ctb10,ctb3-ctb1])
+        concatenation_times.append(catt1-catt0)
+
+    centroids[:,3] = centroids[:,3]*1e6
+    centroids = centroids[:num_centroids].cpu().numpy()
+    if show_bar:
+        progress.update(1)
+        progress.set_description(f"Trigger {num_triggers}/{num_triggers}")
+        progress.set_postfix({'Centroids so far' : num_centroids})
+        current_percentage += 1
+        progress.close()
+        print('Done!')
+
+    if return_time_tests:
+        return centroids,neighbors_times,np.array(centroiding_times),concatenation_times
+    return centroids
+
+def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_centroids',
+                        checkpoint_interval=10,spec_delays=True,skip_last=False,max_gb=3):
+    data_folder = Path(foldy)
+        
+#     file_pattern = f"{foldy}/{cent_filename}_*.npy"
+    existing_files = sorted(Path(foldy).glob(f"{cent_filename}_*.npy"))
+
+    if existing_files:
+        latest_file = existing_files[-1]
+        latest_num = int(latest_file.stem.split("_")[-1])
+    else:
+        latest_file = None
+        latest_num = 1
+
+    if latest_file and latest_file.stat().st_size < max_gb * 10**9:
+        centroids = np.load(latest_file)
+        last_trig_num = int(centroids[-1, 4])
+    else:
+        if spec_delays:
+            centroids = np.zeros((1, 8))
+        else:
+            centroids = np.zeros((1, 6))
+        last_trig_num = 0
+        
+    if latest_file and latest_file.stat().st_size >= max_gb * 10**9:
+        latest_num += 1
+        
+    trigs_file_count_path = data_folder / 'trigs_file_count.npy'
+    if trigs_file_count_path.exists():
+        trigs_file_count = np.load(trigs_file_count_path)
+    else:
+        trigs_file_count = np.zeros((0, 4))
+
+    txt_files = list(data_folder.glob('file*.txt'))
+    txt_files.sort()
+    if skip_last:
+        txt_files.pop()
+        
+    num_files = len(txt_files)
+
+    progress = tqdm(total=num_files)
+    last_file_deleted = -1
+    for jj, txt_file in enumerate(txt_files):
+        param_num_s = str(txt_file).split('_')[-2]
+        param_num = int(param_num_s)
+        filly = (str(txt_file).split('/')[-1])
+        progress.set_description(filly)
+        
+        file_num_s = str(txt_file).split('_')[-4]
+        file_num = int(file_num_s[-6:])
+
+        cents1 = read_file_batched(txt_file,batch_size=batch_size,tottofcorr=tottofcorr,show_bar=False)
+        cents1[:,4] += last_trig_num
+        cents1[:,5] = param_num
+        if np.shape(cents1)[0] > 0:
+            new_last_trig_num = int(cents1[-1,4])
+            trigs_in_file = new_last_trig_num - last_trig_num
+            last_trig_num = new_last_trig_num
+        else:
+            trigs_in_file = 0
+
+        ## want to make this nicer but need to change read_file_batched to output 8 cols then
+        if spec_delays:
+            cents1a = np.full_like(cents1[:,0:2],np.nan)
+            cents1b = np.hstack((cents1,cents1a))
+            cents1 = cents1b.copy()
+            cents1[:,6] = file_num
+            
+        centroids = np.vstack((centroids,cents1))
+
+        progress.update(1)
+        num_centroids = np.shape(centroids)[0]
+        progress.set_postfix({'Centroids so far' : num_centroids})
+        
+        trigs_file_count = np.vstack((trigs_file_count, [param_num, file_num, 0, trigs_in_file]))
+        
+        if (not jj%checkpoint_interval) or (jj == len(txt_files)-1):
+            files_to_del = txt_files[last_file_deleted+1:jj+1]
+            np.save(f'{data_folder}/{cent_filename}_{latest_num}.npy',centroids)
+            np.save(trigs_file_count_path, trigs_file_count)
+            for ff in files_to_del:
+                ff.unlink()
+            last_file_deleted = jj
+
+    progress.close()
+    np.save(f'{data_folder}/{cent_filename}_{latest_num}.npy',centroids)
+    np.save(trigs_file_count_path, trigs_file_count)
+    
+    return centroids
