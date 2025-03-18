@@ -7,8 +7,6 @@ from scipy.optimize import curve_fit
 from tqdm.notebook import tqdm
 from pathlib import Path
 
-# eleanor modified 03/17/25
-
 def centroid_block(block):
     '''
     Produces centroids of hits within a single trigger
