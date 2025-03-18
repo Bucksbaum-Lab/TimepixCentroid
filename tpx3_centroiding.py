@@ -55,7 +55,7 @@ def tottof_fit_func(x, a, b, c, d):
     Parameters
     ~~~~~~~~~~
     x : ToT values of pre-centroided data.
-    a,b,c,d : values defined by isolating a single ion peak, finding the center of the ToF distribution for each ToT by fitting a gaussian, and fitting the resulting ToF(ToT) data to this function. Saved in the hard-coded variable 'fitty', changes in voltage/timing may affect this
+    a,b,c,d : values defined by isolating a single ion peak, finding the center of the ToF distribution for each ToT by fitting a gaussian, and fitting the resulting ToF(ToT) data to this function. Saved in the hard-coded variable 'fitty' in read_file_batched, changes in voltage/timing may affect this
     Returns
     ~~~~~~~~~~
     corrected ToF for input ToT value
