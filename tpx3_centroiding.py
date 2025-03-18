@@ -52,11 +52,11 @@ def tottof_fit_func(x, a, b, c, d):
     Used to correct for tot-tof correlation effect ('timewalk'). Fitted values are predetermined for specific VMI conditions and loaded in. Can also be run post-centroiding but is more precise this way
     Parameters
     ~~~~~~~~~~
-    x : ToT values of pre-centroided data.
-    a,b,c,d : values defined by isolating a single ion peak, finding the center of the ToF distribution for each ToT by fitting a gaussian, and fitting the resulting ToF(ToT) data to this function. Saved in the hard-coded variable 'fitty', changes in voltage/timing may affect this
+    x : float, ToT values of pre-centroided data.
+    a,b,c,d : values defined by isolating a single ion peak, finding the center of the ToF distribution for each ToT by fitting a gaussian, and fitting the resulting ToF(ToT) data to this function. Saved in the hard-coded variable 'fitty' in read_file_batched, changes in voltage/timing may affect this
     Returns
     ~~~~~~~~~~
-    corrected ToF for input ToT value
+    corrected ToF for input ToT value (float)
     '''
     return a / ((x + b) ** d) + c
 
@@ -80,12 +80,12 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     start_trigger_num : 
     return_time_tests : 
     skiprows : 
-    tottofcorr : (default True) Defines whether or not to do the tot/tof correction. Is generally helpful for higher precision ToFs but should be turned off if VMI conditions changed and tot/tof fit parameters need to be refitted to uncorrected data.
-    show_bar : (default True) Defines whether to print time information and progress bar
+    tottofcorr : (default True) Boolean, defines whether or not to do the tot/tof correction. Is generally helpful for higher precision ToFs but should be turned off if VMI conditions changed and tot/tof fit parameters need to be refitted to uncorrected data.
+    show_bar : (default True) Boolean, defines whether to print time information and progress bar
     centroid_area_size : 
     Returns
     ~~~~~~~~~~
-    centroids : Nx6 array of the form [x,y,tot,tof,trigger,parameter]
+    centroids : Array of shape (N,6) containing the information [x,y,tot,tof,trigger number,parameter number] for each hit
     neighbors_times : 
     centroiding_times : 
     concatenation_times : 
@@ -254,6 +254,22 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
 
 def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_centroids',
                         checkpoint_interval=10,spec_delays=True,skip_last=False,max_gb=3):
+    '''
+    Runs get_file_batched in a loop, assuming a particular file structure that comes from our parameter scan code. Adjusts the trigger numbers of each file so they are consistent with the previous ones. Reads the parameter number from the file name and saves it in centroids. Additionally creates (optional, but standard) 2 new columns in centroids for the file number and delay, which is mapped from the file number after measuring spectral interference fringes. Can be run with or without existing centroids.npy file, will load if it exists and append, or create one if it doesn't. 
+    Parameters
+    ~~~~~~~~~~
+    foldy : string, directory name where .tpx3 and .txt files are stored
+    batch_size : 
+    tottofcorr : 
+    cent_filename : 
+    checkpoint_interval : 
+    spec_delays : 
+    skip_last : 
+    max_gb : 
+    Returns
+    ~~~~~~~~~~
+    corrected ToF for input ToT value
+    '''
     data_folder = Path(foldy)
         
 #     file_pattern = f"{foldy}/{cent_filename}_*.npy"
