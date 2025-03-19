@@ -23,7 +23,7 @@ def centroid_block(block):
     centroids_block = (torch.sum(xs*tots)/torch.sum(tots)),(torch.sum(ys*tots)/torch.sum(tots))
     return centroids_block
 
-def get_neighbors(block,size=1,tsep=1.0e-6):
+def get_neighbors(block,size=1,tsep=5.0e-7):
     block_rep = block.expand(block.shape[0],*[-1 for _ in range(len(block.shape))])
     block_sub = block_rep - block_rep.transpose(1,0)
     return (torch.abs(block_sub[:,:,3])<=size)&(torch.abs(block_sub[:,:,2])<=size)&(torch.abs(block_sub[:,:,0])<=tsep)
@@ -69,26 +69,25 @@ def batch_blocks(blocks):
     return block_batch
 
 def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trigger_num=0,
-                      skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2):
+                      skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2,centroid_time_size=5e-7):
     '''
-    True centroiding file. Does all the heavy lifting and micromanaging of the centroiding process. Ian should add more here.
+    Centroids a single TimePix3 file. Uses PyTorch, a Python-based library written for machine learning, to access the GPU and drastically speed up computations. Employs array-based operations that are equivalent to looping but execute in parallel on the GPU. Also uses batch processing of laser triggers (i.e. camera "frames") to further speed up processing.
+    
+    The centroids are computed in the neighborhood of local maxima, using Time-over-Threshold (ToT) as the measure of pixel brightness. The neighborhood of a local maxumim is defined both in X-Y space and in Time-of-Arrival (ToA) space since TimePix is sensitive to both. 
     Parameters
     ~~~~~~~~~~
-    filename : 
-    read_line_num : 
-    batch_size : 
-    start_trigger_num : 
-    return_time_tests : 
-    skiprows : 
+    filename : str, path to .txt file to be processed
+    read_line_num : int (default 100000000), number of lines in .txt file to read. Set this to a smaller number to read a subset of the data.
+    batch_size : int (default 1), number of triggers to process in parallel. The maximum allowable value will depend on the amount of memory your GPU has, as well as the number of electron/ion hits per shot (more hits means more data per laser trigger). We have fount that with the NVIDIA Titan RTX (24 GB memory) and count rates below 100/shot, a batch size of 10 is a reasonable choice. If you get a CUDA Out of Memory error, try restarting the kernel, clearing the GPU cache with torch.cuda.empty_cache(), and then setting the batch size smaller.
+    start_trigger_num : int (default 0), the trigger number to start at. Defaults to 0 (the first trigger in the file).
+    skiprows : int (default 0), skip the first number of lines in the .txt file
     tottofcorr : (default True) Defines whether or not to do the tot/tof correction. Is generally helpful for higher precision ToFs but should be turned off if VMI conditions changed and tot/tof fit parameters need to be refitted to uncorrected data.
     show_bar : (default True) Defines whether to print time information and progress bar
-    centroid_area_size : 
+    centroid_area_size : int (default 2), number of pixels in any direction of the local maximum taken into account when computing the centroid. For the default value of 2, the centroids will be computed in a 5x5-pixel square with the local maximum at the center. This parameter can be adjusted based on your MCP/phosphor voltage depending on the size of the hits you observe.
+    centroid_time_size : float (default 5.0e-7), time window in seconds that defines the neighborhood of a local maximum. Since all the pixels in a single hit should light up within 500 ns of each other, the default is set to this. Setting this to a longer value risks including the pixels from two distinct hits into one centroid.
     Returns
     ~~~~~~~~~~
-    centroids : Nx6 array of the form [x,y,tot,tof,trigger,parameter]
-    neighbors_times : 
-    centroiding_times : 
-    concatenation_times : 
+    centroids : Nx6 array of the form [x,y,tot,tof,trigger,parameter] containing all of the centroid information for each hit.
     '''
     t1 = time.time()
     if read_line_num is None:
@@ -190,7 +189,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         block_batch[:,1,:] += tot_offset2
 
         try:
-            neighbors_batch = get_neighbors(block_batch,size=centroid_area_size)
+            neighbors_batch = get_neighbors(block_batch,size=centroid_area_size,tsep=centroid_time_size)
         except:
             continue
         
