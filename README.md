@@ -1,4 +1,4 @@
 # TimepixCentroid
 TimePix3 fast processing with PyTorch
 
-This is a library of code to be geniusses at finding da centroids :)
+We will add a true README later. For now, if you need help installing anything, please contact Eleanor, Ian, or Chuan.
