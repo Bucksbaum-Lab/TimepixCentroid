@@ -247,20 +247,20 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
 def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_centroids',
                         checkpoint_interval=10,spec_delays=True,skip_last=False,max_gb=3):
     '''
-    Runs get_file_batched in a loop, assuming a particular file structure that comes from our parameter scan code. Adjusts the trigger numbers of each file so they are consistent with the previous ones. Reads the parameter number from the file name and saves it in centroids. Additionally creates (optional, but standard) 2 new columns in centroids for the file number and delay, which is mapped from the file number after measuring spectral interference fringes. Can be run with or without existing centroids.npy file, will load if it exists and append, or create one if it doesn't. 
+    Runs get_file_batched in a loop, assuming a particular file structure that comes from our parameter scan code - specifically, that the .txt filenames are like 'file{filenumber}_param_{parameternumber}_000000.txt'. Adjusts the trigger numbers of each file so they are consistent with the previous ones. Reads the parameter number from the file name and saves it in centroids. Additionally creates (optional, but standard) 2 new columns in centroids for the file number and delay, which is mapped from the file number after measuring spectral interference fringes. Can be run with or without existing centroids.npy file, will load if it exists and append, or create one if it doesn't. 
     Parameters
     ~~~~~~~~~~
-    foldy : string, directory name where .tpx3 and .txt files are stored
-    batch_size : 
-    tottofcorr : 
-    cent_filename : 
-    checkpoint_interval : 
-    spec_delays : 
-    skip_last : 
-    max_gb : 
+    foldy : str, directory name where .tpx3 and .txt files are stored
+    batch_size : int (default 1), number of triggers to process at once within a single batch on the GPU. Usually works well if this value is set to 10 or so.
+    tottofcorr : bool (default True), whether to apply the ToT-ToF correction to individual pixels before centroiding.
+    cent_filename : str (default 'all_centroids'), name of the .npy file where the centroids will be saved. This function appends to the array as new data comes in.
+    checkpoint_interval : int (default 10), number of files to centroid at once before saving the data to all_centroids.npy
+    spec_delays : bool (default True), whether to make 2 extra columns to store true pulse pair delays from spectrometer fringes in a different file. This is a special case to the Bucksbaum lab and should be treated carefully for other users.
+    skip_last : bool (default False), whether to attempt to centroid the file that is currently being collected. This should be set to True for live data processing, and then set to False and rerun one more time once collection is finished.
+    max_gb : int or float (default 3), maximum file size of all_centroids.npy in GB before starting a new file (i.e. all_centroids_2.npy will be started once all_centroids_1.npy exceeds this file size)
     Returns
     ~~~~~~~~~~
-    corrected ToF for input ToT value
+    centroids : numpy array containing all centroids processed by the function when it is run
     '''
     data_folder = Path(foldy)
         
