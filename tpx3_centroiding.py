@@ -42,15 +42,18 @@ def get_neighbors(block,size=1,tsep=5.0e-7):
     return neighbors
 
 def get_local_maxima(block,neighbors,min_size=3,**kwargs):
-    try:
-        tot_neighbors = block[:,1]*neighbors
-        argmaxes = torch.argmax(tot_neighbors,dim=1)
-        local_maxima = torch.unique(argmaxes)
-        return local_maxima
-    except Exception as e:
-        return torch.tensor([],dtype=int).to(block.device)
-
-def get_local_maxima_batch(block,neighbors,min_size=3,**kwargs):
+    '''
+    Finds the brightest pixel in each hit and uses that pixel to centroid around. This uses the pixel Time-over-Threshold (ToT) as the measure of brightness, and uses the neighbors matrix from get_neighbors() to identify separate hits. 
+    The function weights the neighbors matrix by each pixel's ToT value along a column. It then subtracts the value along the diagonal from each row. This produces columns representing each neighborhood where the ToT of the pixel in question along the diagonal has been subtracted from the ToTs of all its neighbors in the column, including itself. The columns where the maximum value in the column is 0 are those that correspond to the local maxima, because all of that pixel's neighbors' ToTs are less than its own. The function returns the indices of these local maximum columns.
+    Parameters
+    ~~~~~~~~~~
+    block : PyTorch tensor of shape (N,4) OR (N,4,N_batch) containing all pixel data from a single trigger OR from a batch of triggers. 
+    neighbors : boolean PyTorch tensor of shape (N,N) OR (N,N,N_batch). The (i,j)th entry indicates whether pixel i and pixel j in block are considered neighbors.
+    min_size : int (default 3). The minimum number of pixels that must be in a neighborhood in order for the maximum pixel in that neighborhood to be considered a true local maximum. Setting min_size>1 eliminates single pixels that happened to light up because these will not give a good centroid.
+    Returns
+    ~~~~~~~
+    local_maxima : boolean PyTorch tensor of shape (N,N_batch) indicating which pixels in block correspond to local maxima.
+    '''
     try:
         block_rep = block.expand(block.shape[0],*[-1 for _ in range(len(block.shape))])
         tot_neighbors = block_rep[:,:,1]*neighbors
@@ -198,7 +201,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         except:
             continue
         
-        local_maxima_filter_batch = get_local_maxima_batch(block_batch,neighbors_batch)
+        local_maxima_filter_batch = get_local_maxima(block_batch,neighbors_batch)
         block_batch[:,1,:] -= tot_offset2
         
         num_local_maxima_batch = torch.sum(local_maxima_filter_batch,dim=0)
