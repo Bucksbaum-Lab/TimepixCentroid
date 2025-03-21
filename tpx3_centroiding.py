@@ -24,9 +24,22 @@ def centroid_block(block):
     return centroids_block
 
 def get_neighbors(block,size=1,tsep=5.0e-7):
+    '''
+    Takes a list of TimePix3 pixels from a single trigger and finds which ones are in the neighborhood of each other. Here, pixels are considered to be neighbors of one another if they light up within a certain distance in each of (X,Y,ToF). This allows us to group pixels that came from the same hit on the MCP/phosphor.
+    This function finds neighbors quickly using array operations on the GPU. For each of (X,Y,ToF), it repeats the array N times to make it a square matrix, then subtracts the transpose of this square matrix from itself. This results in a distance matrix between pixels i and j in the (i,j)th row and column. The neighborhood adjacency matrix is then built by taking a boolean condition on the distance matrix, i.e. abs(distance)<max_distance. Pixels must satisfy the neighbor condition in each of (X,Y,ToF) to be considered neighbors.
+    Parameters
+    ~~~~~~~~~~
+    block : PyTorch tensor of shape (N,4) OR (N,4,N_batch) containing all pixel data from a single trigger OR from a batch of triggers. 
+    size : int (default 1), the +/- size of the neighborhood to consider in X and Y (i.e. size=1 implies 3x3 neighborhoods, size=2 implies 5x5 neighborhoods)
+    tsep : float (default 5.0e-7), ToF neighborhood size in seconds (i.e. tsep=5.0e-7 means pixels within half a microsecond in ToF are considered neighbors)
+    Returns
+    ~~~~~~~
+    neighbors : boolean PyTorch tensor of shape (N,N) OR (N,N,N_batch). The (i,j)th entry indicates whether pixel i and pixel j in block are considered neighbors.
+    '''
     block_rep = block.expand(block.shape[0],*[-1 for _ in range(len(block.shape))])
     block_sub = block_rep - block_rep.transpose(1,0)
-    return (torch.abs(block_sub[:,:,3])<=size)&(torch.abs(block_sub[:,:,2])<=size)&(torch.abs(block_sub[:,:,0])<=tsep)
+    neighbors = (torch.abs(block_sub[:,:,3])<=size)&(torch.abs(block_sub[:,:,2])<=size)&(torch.abs(block_sub[:,:,0])<=tsep)
+    return neighbors
 
 def get_local_maxima(block,neighbors,min_size=3,**kwargs):
     try:
@@ -59,14 +72,6 @@ def tottof_fit_func(x, a, b, c, d):
     corrected ToF for input ToT value (float)
     '''
     return a / ((x + b) ** d) + c
-
-
-def batch_blocks(blocks):
-    max_size = np.max([len(block) for block in blocks])
-    block_batch = torch.zeros((max_size,4,len(blocks)),dtype=torch.float64,device='cuda:0')
-    for i,block in enumerate(blocks):
-        block_batch[:len(block),:,i] = block
-    return block_batch
 
 def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trigger_num=0,
                       skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2,centroid_time_size=5e-7):
