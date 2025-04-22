@@ -157,6 +157,8 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         print(f'sort time: {t0-t0a:.2f} sec')
     
     
+    trigger_lines = np.argwhere(np.sum(data_array[:,1:],axis=1)<-1).flatten()
+    block_sizes = np.diff(trigger_lines)-1
     
     
     #### This section does the batched GPU centroiding #################
