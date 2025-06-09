@@ -77,7 +77,7 @@ def tottof_fit_func(x, a, b, c, d):
     return a / ((x + b) ** d) + c
 
 def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trigger_num=0,
-                      skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2,centroid_time_size=5e-7):
+                      skiprows=0,tottofcorr=True,show_bar=True,centroid_area_size=2,centroid_time_size=5e-7,min_size=3):
     '''
     Centroids a single TimePix3 file. Uses PyTorch, a Python-based library written for machine learning, to access the GPU and drastically speed up computations. Employs array-based operations that are equivalent to looping but execute in parallel on the GPU. Also uses batch processing of laser triggers (i.e. camera "frames") to further speed up processing.
     
@@ -93,6 +93,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     show_bar : (default True) Defines whether to print time information and progress bar
     centroid_area_size : int (default 2), number of pixels in any direction of the local maximum taken into account when computing the centroid. For the default value of 2, the centroids will be computed in a 5x5-pixel square with the local maximum at the center. This parameter can be adjusted based on your MCP/phosphor voltage depending on the size of the hits you observe.
     centroid_time_size : float (default 5.0e-7), time window in seconds that defines the neighborhood of a local maximum. Since all the pixels in a single hit should light up within 500 ns of each other, the default is set to this. Setting this to a longer value risks including the pixels from two distinct hits into one centroid.
+    min_size : int (default 3). The minimum number of pixels that must be in a neighborhood in order for the maximum pixel in that neighborhood to be considered a true local maximum. Setting min_size>1 eliminates single pixels that happened to light up because these will not give a good centroid.
     Returns
     ~~~~~~~~~~
     centroids : Nx6 array of the form [x,y,tot,tof,trigger,parameter] containing all of the centroid information for each hit.
@@ -156,6 +157,8 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         print(f'sort time: {t0-t0a:.2f} sec')
     
     
+    trigger_lines = np.argwhere(np.sum(data_array[:,1:],axis=1)<-1).flatten()
+    block_sizes = np.diff(trigger_lines)-1
     
     
     #### This section does the batched GPU centroiding #################
@@ -201,7 +204,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         except:
             continue
         
-        local_maxima_filter_batch = get_local_maxima(block_batch,neighbors_batch)
+        local_maxima_filter_batch = get_local_maxima(block_batch,neighbors_batch,min_size=min_size)
         block_batch[:,1,:] -= tot_offset2
         
         num_local_maxima_batch = torch.sum(local_maxima_filter_batch,dim=0)
