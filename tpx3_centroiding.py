@@ -195,7 +195,6 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
                 block_size = block_sizes[trigger_num-start_trigger_num+i]
                 block_batch[:block_size,:,i] = data_array[trigger_lines[trigger_num-start_trigger_num+i]+1:trigger_lines[trigger_num-start_trigger_num+i+1]]
             except Exception as e:
-                print(e)
                 block_batch = block_batch[:,:,:i]
         block_batch[:,1,:] += tot_offset2
 
