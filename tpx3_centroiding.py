@@ -214,6 +214,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         centroids_y_batch = (torch.sum(block_batch[:,2]*neighbors_batch*block_batch[:,1],axis=1)/torch.sum(block_batch[:,1]*neighbors_batch,axis=1))
         centroids_x_batch = centroids_x_batch[lmfb]
         centroids_y_batch = centroids_y_batch[lmfb]
+        toas_mean_batch = (torch.sum(block_batch[:,0]*neighbors_batch*block_batch[:,1],axis=1)/torch.sum(block_batch[:,1]*neighbors_batch,axis=1))
 
         trigger_vals_batch = torch.tensor([data_array[trigger_lines[trigger_num-start_trigger_num+batch_trigger_num],0] for batch_trigger_num in range(local_maxima_filter_batch.shape[-1])],device=local_maxima_filter_batch.device,dtype=torch.float64)
         trigger_nums_batch = (local_maxima_filter_batch*torch.arange(trigger_num,trigger_num+local_maxima_filter_batch.shape[-1],1,device=local_maxima_filter_batch.device,dtype=torch.float64))[lmfb]
@@ -221,6 +222,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
         
         tot_hits_batch = block_batch[:,1][lmfb]
         toa_hits_batch = block_batch[:,0][lmfb]-triggers_batch.cuda()
+        
 
         param_nums = torch.ones(trigger_nums_batch.shape[0]).cuda()*(param_number-1)
         
@@ -248,7 +250,7 @@ def read_file_batched(filename,read_line_num = 100000000,batch_size=1,start_trig
     return centroids
 
 def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_centroids',
-                        checkpoint_interval=10,spec_delays=True,skip_last=False,max_gb=3):
+                        checkpoint_interval=10,spec_delays=True,skip_last=False,max_gb=3,check_filesz=False):
     '''
     Runs get_file_batched in a loop, assuming a particular file structure that comes from our parameter scan code - specifically, that the .txt filenames are like 'file{filenumber}_param_{parameternumber}_000000.txt'. Adjusts the trigger numbers of each file so they are consistent with the previous ones. Reads the parameter number from the file name and saves it in centroids. Additionally creates (optional, but standard) 2 new columns in centroids for the file number and delay, which is mapped from the file number after measuring spectral interference fringes. Can be run with or without existing centroids.npy file, will load if it exists and append, or create one if it doesn't. 
     Parameters
@@ -296,6 +298,8 @@ def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_ce
     else:
         trigs_file_count = np.zeros((0, 4))
 
+    already_processed = set(zip(trigs_file_count[:,0].astype(int), trigs_file_count[:,1].astype(int)))
+
     txt_files = list(data_folder.glob('file*.txt'))
     txt_files.sort()
     if skip_last:
@@ -313,6 +317,12 @@ def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_ce
         
         file_num_s = str(txt_file).split('_')[-4]
         file_num = int(file_num_s[-6:])
+
+        if (param_num, file_num) in already_processed:
+            print(f'Skipping {filly} -- already recorded in trigs_file_count; deleting leftover file.')
+            txt_file.unlink()
+            progress.update(1)
+            continue
 
         cents1 = read_file_batched(txt_file,batch_size=batch_size,tottofcorr=tottofcorr,show_bar=False)
         cents1[:,4] += last_trig_num
@@ -341,14 +351,25 @@ def centroid_multi_scan(foldy,batch_size=1,tottofcorr=True,cent_filename='all_ce
         
         if (not jj%checkpoint_interval) or (jj == len(txt_files)-1):
             files_to_del = txt_files[last_file_deleted+1:jj+1]
-            np.save(f'{data_folder}/{cent_filename}_{latest_num}.npy',centroids)
+            np.save(f'{data_folder}/{cent_filename}_{latest_num:04d}.npy',centroids)
             np.save(trigs_file_count_path, trigs_file_count)
             for ff in files_to_del:
                 ff.unlink()
             last_file_deleted = jj
+            if latest_file is None:
+                latest_file = data_folder / f'{cent_filename}_{latest_num:04d}.npy'
+
+            if check_filesz and latest_file.stat().st_size >= max_gb * 10**9:
+                latest_num += 1
+                latest_file = data_folder / f'{cent_filename}_{latest_num:04d}.npy'
+                if spec_delays:
+                    centroids = np.zeros((1, 8))
+                else:
+                    centroids = np.zeros((1, 6))
+                last_trig_num = 0
 
     progress.close()
-    np.save(f'{data_folder}/{cent_filename}_{latest_num}.npy',centroids)
+    np.save(f'{data_folder}/{cent_filename}_{latest_num:04d}.npy',centroids)
     np.save(trigs_file_count_path, trigs_file_count)
     
     return centroids
